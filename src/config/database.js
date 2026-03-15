@@ -1,61 +1,28 @@
 const { Pool } = require('pg');
 const logger = require('./logger');
 
-// Parse connection string to handle SSL properly
-const config = {
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' 
-    ? { 
-        rejectUnauthorized: false, // For self-signed certs (Render/Railway/Neon)
-        // Use verify-full for production security
-        sslmode: 'verify-full'
-      } 
+    ? { rejectUnauthorized: false }
     : false,
-  
-  // Connection pool settings (optimized for serverless)
   max: process.env.IS_SERVERLESS === 'true' ? 1 : 10,
   min: 0,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000, // Fail fast if DB unreachable
-  
-  // Keep connections alive (prevents "Connection terminated unexpectedly")
+  connectionTimeoutMillis: 10000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
-  
-  // Statement timeout (prevent hanging queries)
-  statement_timeout: 30000, // 30s max per query
-  query_timeout: 30000,
-};
-
-// Remove sslmode from connection string to avoid conflicts
-if (config.connectionString) {
-  config.connectionString = config.connectionString.replace(/[?&]sslmode=[^&]+/, '');
-}
-
-const pool = new Pool(config);
-
-// Connection error handling
-pool.on('error', (err, client) => {
-  logger.error('Unexpected pool error:', {
-    message: err.message,
-    stack: err.stack,
-    client: client ? 'active' : 'idle'
-  });
 });
 
-pool.on('connect', (client) => {
-  logger.debug('New client connected to DB pool');
-});
-
-pool.on('remove', () => {
-  logger.debug('Client removed from DB pool');
+pool.on('error', (err) => {
+  logger.error('Unexpected pool error:', err.message);
 });
 
 let isConnected = false;
 
 async function connectDB() {
   if (isConnected) {
-    logger.debug('DB already connected, skipping...');
+    logger.debug('DB already connected');
     return;
   }
 
@@ -67,44 +34,27 @@ async function connectDB() {
       logger.info(`DB connection attempt ${attempt}/${maxRetries}...`);
       
       const client = await pool.connect();
-      
-      // Test query with timeout
-      const result = await client.query('SELECT NOW() as now, version() as version');
+      await client.query('SELECT NOW()');
       client.release();
 
       isConnected = true;
-      
-      logger.info('✅ PostgreSQL connected', {
-        timestamp: result.rows[0].now,
-        version: result.rows[0].version.split(' ')[0], // e.g., "PostgreSQL 15.3"
-        poolMax: config.max,
-        ssl: config.ssl ? 'enabled' : 'disabled'
-      });
-      
+      logger.info('✅ PostgreSQL connected');
       return;
 
     } catch (err) {
       lastError = err;
-      logger.warn(`DB connection attempt ${attempt} failed:`, {
-        message: err.message,
-        code: err.code,
-        host: maskConnectionString(process.env.DATABASE_URL)
-      });
-
-      // Wait before retry (exponential backoff)
+      logger.warn(`DB attempt ${attempt} failed: ${err.message}`);
+      
       if (attempt < maxRetries) {
         const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
-        logger.info(`Retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
 
-  // All retries failed
-  throw new Error(`Failed to connect to database after ${maxRetries} attempts: ${lastError.message}`);
+  throw new Error(`DB connection failed: ${lastError.message}`);
 }
 
-// Graceful shutdown
 async function disconnectDB() {
   if (!isConnected) return;
   
@@ -117,15 +67,4 @@ async function disconnectDB() {
   }
 }
 
-// Helper to mask sensitive data in logs
-function maskConnectionString(connStr) {
-  if (!connStr) return 'undefined';
-  return connStr.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
-}
-
-module.exports = { 
-  pool, 
-  connectDB, 
-  disconnectDB,
-  isConnected: () => isConnected 
-};
+module.exports = { pool, connectDB, disconnectDB };

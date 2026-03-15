@@ -8,15 +8,22 @@ const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 
 const logger = require('./config/logger');
-const { connectDB, pool } = require('./config/database');
+const { connectDB, disconnectDB, pool } = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const routes = require('./routes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
 
+// ── SERVERLESS DETECTION ──────────────────────────────────────────────────────
+const IS_SERVERLESS = !!(
+  process.env.VERCEL || 
+  process.env.NETLIFY || 
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.IS_SERVERLESS === 'true'
+);
+
 // ── TRUST PROXY (required for Railway/Render/Vercel) ─────────────────────────
-// Ensures req.ip is real IP, not load balancer IP
 app.set('trust proxy', 1);
 
 // ── REQUEST ID ────────────────────────────────────────────────────────────────
@@ -43,8 +50,8 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000').
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) {return callback(null, true)} // Postman, mobile apps
-    if (allowedOrigins.includes(origin)) {return callback(null, true)}
+    if (!origin) { return callback(null, true); } // Postman, mobile apps
+    if (allowedOrigins.includes(origin)) { return callback(null, true); }
     logger.warn(`CORS blocked: ${origin}`);
     callback(new Error(`CORS: Origin ${origin} not allowed`));
   },
@@ -67,12 +74,11 @@ if (process.env.NODE_ENV === 'development') {
 } else {
   app.use(morgan('combined', {
     stream: { write: (msg) => logger.info(msg.trim()) },
-    skip: (req) => req.url === '/health', // don't log health pings
+    skip: (req) => req.url === '/health',
   }));
 }
 
 // ── RATE LIMITING ─────────────────────────────────────────────────────────────
-// Global
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'production' ? 200 : 1000,
@@ -82,21 +88,18 @@ const globalLimiter = rateLimit({
   message: { success: false, message: 'Too many requests. Please slow down.' },
 });
 
-// Auth — strict (prevent brute force)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: process.env.NODE_ENV === 'production' ? 20 : 100,
   message: { success: false, message: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
-// Public QR scans — generous
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   message: { success: false, message: 'Too many requests.' },
 });
 
-// Brochure — expensive (Puppeteer), limit hard
 const brochureLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: process.env.NODE_ENV === 'production' ? 5 : 20,
@@ -111,7 +114,6 @@ app.use(`/api/${process.env.API_VERSION || 'v1'}/brochure/`, brochureLimiter);
 
 // ── HEALTH CHECK ──────────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
-  // Deep health — check DB + Redis
   const checks = { api: 'ok', db: 'unknown', redis: 'unknown' };
 
   try {
@@ -123,8 +125,8 @@ app.get('/health', async (req, res) => {
 
   try {
     const { client: redisClient } = require('./config/redis');
-    if (redisClient?.status === 'ready') {checks.redis = 'ok'}
-    else {checks.redis = 'degraded'}
+    if (redisClient?.status === 'ready') { checks.redis = 'ok'; }
+    else { checks.redis = 'degraded'; }
   } catch {
     checks.redis = 'degraded';
   }
@@ -135,6 +137,7 @@ app.get('/health', async (req, res) => {
     app: process.env.APP_NAME || 'QR Estate API',
     version: process.env.npm_package_version || '1.0.0',
     env: process.env.NODE_ENV,
+    serverless: IS_SERVERLESS,
     checks,
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
@@ -152,18 +155,56 @@ app.get('/q/:shortCode', redirectQR);
 app.use(notFound);
 app.use(errorHandler);
 
-// ── START SERVER ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// ── SERVERLESS INITIALIZATION ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+let isInitialized = false;
+
+async function initializeConnections() {
+  if (isInitialized) {
+    return;
+  }
+
+  try {
+    logger.info('Initializing connections...');
+    
+    // Connect to database (required)
+    await connectDB();
+    
+    // Connect to Redis (optional, don't block on failure)
+    try {
+      await connectRedis();
+    } catch (err) {
+      logger.warn('Redis connection failed (app will continue):', err.message);
+    }
+    
+    isInitialized = true;
+    logger.info('✅ Connections initialized');
+  } catch (err) {
+    logger.error('❌ Connection initialization failed:', err.message);
+    throw err;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── TRADITIONAL SERVER MODE ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
 const PORT = parseInt(process.env.PORT) || 5000;
 
 async function startServer() {
   try {
-    await connectDB();
-    await connectRedis();
+    logger.info('🚀 Starting QR Estate API...');
+    logger.info(`   Environment : ${process.env.NODE_ENV}`);
+    logger.info(`   Serverless  : ${IS_SERVERLESS}`);
 
-    const server = app.listen(PORT, () => {
-      logger.info(`🚀 QR Estate API`);
-      logger.info(`   Port        : ${PORT}`);
-      logger.info(`   Environment : ${process.env.NODE_ENV}`);
+    // Initialize DB and Redis connections
+    await initializeConnections();
+
+    // Start HTTP server
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      logger.info(`✅ Server listening on port ${PORT}`);
       logger.info(`   API Base    : http://localhost:${PORT}/api/${process.env.API_VERSION || 'v1'}`);
       logger.info(`   Health      : http://localhost:${PORT}/health`);
     });
@@ -175,43 +216,67 @@ async function startServer() {
       cron.schedule('0 9 * * *', () => {
         runGlobalHealthCheck().catch(err => logger.error('Cron error:', err));
       });
-      logger.info('   Cron        : Health check @ 9am IST daily');
+      logger.info('   Cron        : Health check @ 9am daily');
     }
 
     // ── GRACEFUL SHUTDOWN ──────────────────────────────────────────────────
     const shutdown = async (signal) => {
       logger.info(`${signal} received — shutting down gracefully...`);
+      
       server.close(async () => {
         try {
-          await pool.end();
+          await disconnectDB();
           logger.info('DB pool closed');
-        } catch(err) {
-          console.log(err);
-          
+        } catch (err) {
+          logger.error('Error closing DB pool:', err);
         }
         logger.info('Server closed');
         process.exit(0);
       });
+
       // Force kill after 10s
-      setTimeout(() => process.exit(1), 10000);
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout');
+        process.exit(1);
+      }, 10000);
     };
 
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('SIGINT', () => shutdown('SIGINT'));
+
     process.on('uncaughtException', (err) => {
-      logger.error('Uncaught exception:', err);
+      logger.error('❌ Uncaught exception:', {
+        message: err.message,
+        stack: err.stack
+      });
       shutdown('uncaughtException');
     });
+
     process.on('unhandledRejection', (reason) => {
-      logger.error('Unhandled rejection:', reason);
+      logger.error('❌ Unhandled rejection:', reason);
     });
 
   } catch (err) {
-    logger.error('Failed to start:', err);
+    logger.error('❌ Failed to start server:', {
+      message: err.message,
+      stack: err.stack,
+      code: err.code
+    });
     process.exit(1);
   }
 }
 
-startServer();
+// ══════════════════════════════════════════════════════════════════════════════
+// ── EXPORTS ───────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Start server only in non-serverless mode
+if (!IS_SERVERLESS) {
+  startServer();
+}
+
+// Export for serverless platforms
 module.exports = app;
 
+// Export initialization function for serverless entry files
+module.exports.initializeConnections = initializeConnections;
