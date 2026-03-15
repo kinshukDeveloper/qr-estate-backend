@@ -18,6 +18,7 @@
     "db:seed:leads": "node seeds/seed-leads.js"
   },
   "dependencies": {
+    "@upstash/redis": "^1.37.0",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.0.0",
     "compression": "^1.7.4",

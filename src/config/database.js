@@ -1,17 +1,27 @@
 const { Pool } = require('pg');
 const logger = require('./logger');
 
+// const pool = new Pool({
+//   connectionString: process.env.DATABASE_URL,
+//   host: process.env.DB_HOST || 'localhost',
+//   port: parseInt(process.env.DB_PORT) || 5432,
+//   database: process.env.DB_NAME || 'qr_estate',
+//   user: process.env.DB_USER || 'postgres',
+//   password: process.env.DB_PASSWORD,
+//   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+//   max: 20,                // max connections in pool
+//   idleTimeoutMillis: 30000,
+//   connectionTimeoutMillis: 2000,
+// });
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT) || 5432,
-  database: process.env.DB_NAME || 'qr_estate',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD,
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-  max: 20,                // max connections in pool
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: parseInt(process.env.DB_POOL_MAX) || 20,
+  idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT) || 10000,
+  connectionTimeoutMillis: parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT) || 2000,
 });
 
 // Log pool events in development
