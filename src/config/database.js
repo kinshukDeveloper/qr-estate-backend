@@ -1,90 +1,131 @@
 const { Pool } = require('pg');
 const logger = require('./logger');
 
-// const pool = new Pool({
-//   connectionString: process.env.DATABASE_URL,
-//   host: process.env.DB_HOST || 'localhost',
-//   port: parseInt(process.env.DB_PORT) || 5432,
-//   database: process.env.DB_NAME || 'qr_estate',
-//   user: process.env.DB_USER || 'postgres',
-//   password: process.env.DB_PASSWORD,
-//   ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-//   max: 20,                // max connections in pool
-//   idleTimeoutMillis: 30000,
-//   connectionTimeoutMillis: 2000,
-// });
-
-const pool = new Pool({
+// Parse connection string to handle SSL properly
+const config = {
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  },
-  max: parseInt(process.env.DB_POOL_MAX) || 20,
-  idleTimeoutMillis: parseInt(process.env.DB_POOL_IDLE_TIMEOUT) || 10000,
-  connectionTimeoutMillis: parseInt(process.env.DB_POOL_CONNECTION_TIMEOUT) || 2000,
+  ssl: process.env.NODE_ENV === 'production' 
+    ? { 
+        rejectUnauthorized: false, // For self-signed certs (Render/Railway/Neon)
+        // Use verify-full for production security
+        sslmode: 'verify-full'
+      } 
+    : false,
+  
+  // Connection pool settings (optimized for serverless)
+  max: process.env.IS_SERVERLESS === 'true' ? 1 : 10,
+  min: 0,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000, // Fail fast if DB unreachable
+  
+  // Keep connections alive (prevents "Connection terminated unexpectedly")
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
+  
+  // Statement timeout (prevent hanging queries)
+  statement_timeout: 30000, // 30s max per query
+  query_timeout: 30000,
+};
+
+// Remove sslmode from connection string to avoid conflicts
+if (config.connectionString) {
+  config.connectionString = config.connectionString.replace(/[?&]sslmode=[^&]+/, '');
+}
+
+const pool = new Pool(config);
+
+// Connection error handling
+pool.on('error', (err, client) => {
+  logger.error('Unexpected pool error:', {
+    message: err.message,
+    stack: err.stack,
+    client: client ? 'active' : 'idle'
+  });
 });
 
-// Log pool events in development
-pool.on('connect', () => {
-  if (process.env.NODE_ENV === 'development') {
-    logger.debug('New database client connected');
-    logger.info("DB URL exists:", !!process.env.DATABASE_URL);
-  }
+pool.on('connect', (client) => {
+  logger.debug('New client connected to DB pool');
 });
 
-pool.on('error', (err) => {
-  logger.error('Unexpected database pool error:', err);
+pool.on('remove', () => {
+  logger.debug('Client removed from DB pool');
 });
 
-/**
- * Connect and verify database is reachable
- */
+let isConnected = false;
+
 async function connectDB() {
-  const client = await pool.connect();
-  try {
-    const result = await client.query('SELECT NOW() as time, current_database() as db');
-    logger.info(`✅ PostgreSQL connected — DB: ${result.rows[0].db}`);
-  } finally {
-    client.release();
+  if (isConnected) {
+    logger.debug('DB already connected, skipping...');
+    return;
   }
-}
 
-/**
- * Execute a query with optional parameters
- * Usage: await query('SELECT * FROM users WHERE id = $1', [userId])
- */
-async function query(text, params) {
-  const start = Date.now();
-  try {
-    const result = await pool.query(text, params);
-    const duration = Date.now() - start;
-    if (process.env.NODE_ENV === 'development' && duration > 200) {
-      logger.warn(`Slow query (${duration}ms): ${text.substring(0, 80)}...`);
+  const maxRetries = 3;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      logger.info(`DB connection attempt ${attempt}/${maxRetries}...`);
+      
+      const client = await pool.connect();
+      
+      // Test query with timeout
+      const result = await client.query('SELECT NOW() as now, version() as version');
+      client.release();
+
+      isConnected = true;
+      
+      logger.info('✅ PostgreSQL connected', {
+        timestamp: result.rows[0].now,
+        version: result.rows[0].version.split(' ')[0], // e.g., "PostgreSQL 15.3"
+        poolMax: config.max,
+        ssl: config.ssl ? 'enabled' : 'disabled'
+      });
+      
+      return;
+
+    } catch (err) {
+      lastError = err;
+      logger.warn(`DB connection attempt ${attempt} failed:`, {
+        message: err.message,
+        code: err.code,
+        host: maskConnectionString(process.env.DATABASE_URL)
+      });
+
+      // Wait before retry (exponential backoff)
+      if (attempt < maxRetries) {
+        const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
+        logger.info(`Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
     }
-    return result;
+  }
+
+  // All retries failed
+  throw new Error(`Failed to connect to database after ${maxRetries} attempts: ${lastError.message}`);
+}
+
+// Graceful shutdown
+async function disconnectDB() {
+  if (!isConnected) return;
+  
+  try {
+    await pool.end();
+    isConnected = false;
+    logger.info('DB pool closed');
   } catch (err) {
-    logger.error('Database query error:', { query: text, error: err.message });
-    throw err;
+    logger.error('Error closing DB pool:', err);
   }
 }
 
-/**
- * Get a client for transactions
- * Usage:
- *   const client = await getClient();
- *   try {
- *     await client.query('BEGIN');
- *     ...
- *     await client.query('COMMIT');
- *   } catch (e) {
- *     await client.query('ROLLBACK');
- *     throw e;
- *   } finally {
- *     client.release();
- *   }
- */
-async function getClient() {
-  return pool.connect();
+// Helper to mask sensitive data in logs
+function maskConnectionString(connStr) {
+  if (!connStr) return 'undefined';
+  return connStr.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
 }
 
-module.exports = { connectDB, query, getClient, pool };
+module.exports = { 
+  pool, 
+  connectDB, 
+  disconnectDB,
+  isConnected: () => isConnected 
+};
