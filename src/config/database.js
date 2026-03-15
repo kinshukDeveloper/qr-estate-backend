@@ -28,6 +28,7 @@ const pool = new Pool({
 pool.on('connect', () => {
   if (process.env.NODE_ENV === 'development') {
     logger.debug('New database client connected');
+    logger.info("DB URL exists:", !!process.env.DATABASE_URL);
   }
 });
 
