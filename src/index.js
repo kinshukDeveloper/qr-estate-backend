@@ -12,9 +12,9 @@ const { connectDB, disconnectDB, pool } = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const routes = require('./routes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
-app.use(express.static(path.join(__dirname, "../public")));
 
 const app = express();
+app.use(express.static(path.join(__dirname, "../public")));
 
 // ── SERVERLESS DETECTION ──────────────────────────────────────────────────────
 const IS_SERVERLESS = !!(
