@@ -7,11 +7,11 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 
-const logger = require('./src/config/logger');
-const { connectDB, disconnectDB, pool } = require('./src/config/database');
-const { connectRedis } = require('./src/config/redis');
-const routes = require('./src/routes');
-const { errorHandler, notFound } = require('./src/middleware/errorHandler');
+const logger = require('./config/logger');
+const { connectDB, disconnectDB, pool } = require('./config/database');
+const { connectRedis } = require('./config/redis');
+const routes = require('./routes');
+const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
 

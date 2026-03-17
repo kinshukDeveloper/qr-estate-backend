@@ -13,7 +13,7 @@ let app;
 let initializeConnections;
 
 try {
-  const mainModule = require('../index');
+  const mainModule = require('../src/index');
   app = mainModule;
   initializeConnections = mainModule.initializeConnections;
 } catch (err) {
