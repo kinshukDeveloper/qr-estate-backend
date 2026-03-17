@@ -26,8 +26,8 @@ const logger = winston.createLogger({
   transports: [
     new winston.transports.Console(),
     // Uncomment for file logging in production:
-    new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'logs/combined.log' }),
+    // new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
+    // new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
   exceptionHandlers: [
     new winston.transports.Console(),
@@ -36,5 +36,11 @@ const logger = winston.createLogger({
     new winston.transports.Console(),
   ],
 });
+
+if (process.env.NODE_ENV !== "production") {
+  logger.add(
+    new winston.transports.File({ filename: "logs/app.log" })
+  )
+}
 
 module.exports = logger;

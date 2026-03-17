@@ -14,6 +14,8 @@ const routes = require('./routes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
+
+app.use(express.json())
 app.use(express.static(path.join(__dirname, "../public")));
 
 // ── SERVERLESS DETECTION ──────────────────────────────────────────────────────
@@ -33,6 +35,13 @@ app.use((req, res, next) => {
   res.setHeader('X-Request-ID', req.id);
   next();
 });
+
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "QR Estate API is running 🚀"
+  })
+})
 
 // ── SECURITY HEADERS ──────────────────────────────────────────────────────────
 app.use(helmet({
