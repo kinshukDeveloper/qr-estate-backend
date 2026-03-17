@@ -6,12 +6,13 @@ const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
-
+const path = require("path");
 const logger = require('./config/logger');
 const { connectDB, disconnectDB, pool } = require('./config/database');
 const { connectRedis } = require('./config/redis');
 const routes = require('./routes');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
+app.use(express.static(path.join(__dirname, "../public")));
 
 const app = express();
 
