@@ -7,23 +7,23 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { v4: uuidv4 } = require('uuid');
 
-const logger = require('./config/logger');
-const { connectDB, disconnectDB, pool } = require('./config/database');
-const { connectRedis } = require('./config/redis');
-const routes = require('./routes');
-const { errorHandler, notFound } = require('./middleware/errorHandler');
+const logger = require('./src/config/logger');
+const { connectDB, disconnectDB, pool } = require('./src/config/database');
+const { connectRedis } = require('./src/config/redis');
+const routes = require('./src/routes');
+const { errorHandler, notFound } = require('./src/middleware/errorHandler');
 
 const app = express();
 
 // ── SERVERLESS DETECTION ──────────────────────────────────────────────────────
 const IS_SERVERLESS = !!(
-  process.env.VERCEL || 
-  process.env.NETLIFY || 
+  process.env.VERCEL ||
+  process.env.NETLIFY ||
   process.env.AWS_LAMBDA_FUNCTION_NAME ||
   process.env.IS_SERVERLESS === 'true'
 );
 
-// ── TRUST PROXY (required for Railway/Render/Vercel) ─────────────────────────
+// ── TRUST PROXY ───────────────────────────────────────────────────────────────
 app.set('trust proxy', 1);
 
 // ── REQUEST ID ────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── SECURITY HEADERS (Helmet) ────────────────────────────────────────────────
+// ── SECURITY HEADERS ──────────────────────────────────────────────────────────
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false,
@@ -42,16 +42,17 @@ app.use(helmet({
     : false,
 }));
 
-// Remove fingerprinting headers
 app.disable('x-powered-by');
 
-// ── CORS ─────────────────────────────────────────────────────────────────────
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000').split(',').map(o => o.trim());
+// ── CORS ──────────────────────────────────────────────────────────────────────
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000')
+  .split(',')
+  .map(o => o.trim());
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) { return callback(null, true); } // Postman, mobile apps
-    if (allowedOrigins.includes(origin)) { return callback(null, true); }
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
     logger.warn(`CORS blocked: ${origin}`);
     callback(new Error(`CORS: Origin ${origin} not allowed`));
   },
@@ -119,14 +120,18 @@ app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
     checks.db = 'ok';
-  } catch {
+  } catch (err) {
     checks.db = 'error';
+    logger.error('Health check DB error:', err.message);
   }
 
   try {
     const { client: redisClient } = require('./config/redis');
-    if (redisClient?.status === 'ready') { checks.redis = 'ok'; }
-    else { checks.redis = 'degraded'; }
+    if (redisClient?.status === 'ready') {
+      checks.redis = 'ok';
+    } else {
+      checks.redis = 'degraded';
+    }
   } catch {
     checks.redis = 'degraded';
   }
@@ -148,43 +153,51 @@ app.get('/health', async (req, res) => {
 app.use(`/api/${process.env.API_VERSION || 'v1'}`, routes);
 
 // ── QR SHORT CODE REDIRECT ────────────────────────────────────────────────────
-const { redirectQR } = require('./controllers/qrController');
-app.get('/q/:shortCode', redirectQR);
+try {
+  const { redirectQR } = require('./controllers/qrController');
+  app.get('/q/:shortCode', redirectQR);
+} catch (err) {
+  logger.warn('QR redirect route not loaded:', err.message);
+}
 
 // ── 404 & ERROR ───────────────────────────────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ── SERVERLESS INITIALIZATION ─────────────────────────────────────────────────
+// ── CONNECTION INITIALIZATION ─────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 
 let isInitialized = false;
 
 async function initializeConnections() {
   if (isInitialized) {
+    logger.debug('Already initialized, skipping...');
     return;
   }
 
+  logger.info('🔄 Initializing connections...');
+
   try {
-    logger.info('Initializing connections...');
-    
     // Connect to database (required)
     await connectDB();
-    
-    // Connect to Redis (optional, don't block on failure)
-    try {
-      await connectRedis();
-    } catch (err) {
-      logger.warn('Redis connection failed (app will continue):', err.message);
-    }
-    
-    isInitialized = true;
-    logger.info('✅ Connections initialized');
+    logger.info('✅ Database connected');
   } catch (err) {
-    logger.error('❌ Connection initialization failed:', err.message);
-    throw err;
+    logger.error('❌ Database connection failed:', err.message);
+    throw err; // DB is required, fail if can't connect
   }
+
+  try {
+    // Connect to Redis (optional)
+    await connectRedis();
+    logger.info('✅ Redis connected');
+  } catch (err) {
+    logger.warn('⚠️ Redis connection failed (continuing without Redis):', err.message);
+    // Don't throw - Redis is optional
+  }
+
+  isInitialized = true;
+  logger.info('✅ All connections initialized');
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -199,34 +212,53 @@ async function startServer() {
     logger.info(`   Environment : ${process.env.NODE_ENV}`);
     logger.info(`   Serverless  : ${IS_SERVERLESS}`);
 
-    // Initialize DB and Redis connections
     await initializeConnections();
 
-    // Start HTTP server
     const server = app.listen(PORT, '0.0.0.0', () => {
       logger.info(`✅ Server listening on port ${PORT}`);
       logger.info(`   API Base    : http://localhost:${PORT}/api/${process.env.API_VERSION || 'v1'}`);
       logger.info(`   Health      : http://localhost:${PORT}/health`);
     });
 
-    // ── CRON JOBS ──────────────────────────────────────────────────────────
-    if (process.env.NODE_ENV !== 'test') {
-      const cron = require('node-cron');
-      const { runGlobalHealthCheck } = require('./services/healthService');
-      cron.schedule('0 9 * * *', () => {
-        runGlobalHealthCheck().catch(err => logger.error('Cron error:', err));
-      });
-      logger.info('   Cron        : Health check @ 9am daily');
-    }
+    // ── CRON JOBS ──────────────────────────────────────────────────────────────
+    if (process.env.NODE_ENV !== 'test' && !IS_SERVERLESS) {
+      try {
+        const cron = require('node-cron');
+        const { runGlobalHealthCheck } = require('./services/healthService');
 
+        // Daily health check at 9am
+        cron.schedule('0 9 * * *', async () => {
+          try {
+            await runGlobalHealthCheck();
+          } catch (err) {
+            logger.error('Cron job error:', err);
+          }
+        });
+
+        logger.info('   Cron        : Health check @ 9am daily');
+
+      } catch (err) {
+        // More descriptive warning
+        if (err.code === 'MODULE_NOT_FOUND') {
+          if (err.message.includes('node-cron')) {
+            logger.warn('⚠️ Cron: node-cron not installed. Run: npm install node-cron');
+          } else if (err.message.includes('healthService')) {
+            logger.warn('⚠️ Cron: healthService not found. Create: src/services/healthService.js');
+          } else {
+            logger.warn('⚠️ Cron: Missing module -', err.message);
+          }
+        } else {
+          logger.warn('⚠️ Cron jobs not loaded:', err.message);
+        }
+      }
+    }
     // ── GRACEFUL SHUTDOWN ──────────────────────────────────────────────────
     const shutdown = async (signal) => {
       logger.info(`${signal} received — shutting down gracefully...`);
-      
+
       server.close(async () => {
         try {
           await disconnectDB();
-          logger.info('DB pool closed');
         } catch (err) {
           logger.error('Error closing DB pool:', err);
         }
@@ -234,7 +266,6 @@ async function startServer() {
         process.exit(0);
       });
 
-      // Force kill after 10s
       setTimeout(() => {
         logger.error('Forced shutdown after timeout');
         process.exit(1);
@@ -245,10 +276,7 @@ async function startServer() {
     process.on('SIGINT', () => shutdown('SIGINT'));
 
     process.on('uncaughtException', (err) => {
-      logger.error('❌ Uncaught exception:', {
-        message: err.message,
-        stack: err.stack
-      });
+      logger.error('❌ Uncaught exception:', err);
       shutdown('uncaughtException');
     });
 
@@ -257,26 +285,22 @@ async function startServer() {
     });
 
   } catch (err) {
-    logger.error('❌ Failed to start server:', {
-      message: err.message,
-      stack: err.stack,
-      code: err.code
-    });
+    logger.error('❌ Failed to start server:', err);
     process.exit(1);
   }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ── EXPORTS ───────────────────────────────────────────────────────────────────
+// ── EXPORTS & STARTUP ─────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Start server only in non-serverless mode
+// Only start server in non-serverless mode
 if (!IS_SERVERLESS) {
   startServer();
+} else {
+  logger.info('📦 Running in serverless mode');
 }
 
-// Export for serverless platforms
+// Export app and initialization function
 module.exports = app;
-
-// Export initialization function for serverless entry files
 module.exports.initializeConnections = initializeConnections;
